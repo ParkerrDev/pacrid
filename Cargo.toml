@@ -1,0 +1,49 @@
+[package]
+name = "pacrid"
+version = "0.1.0"
+edition = "2021"
+description = "Leftover-file reaper for Arch Linux"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/sauccydev/pacrid"
+rust-version = "1.80"
+
+[[bin]]
+name = "pacrid"
+path = "src/main.rs"
+
+[lib]
+name = "pacrid"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "1"
+dialoguer = "0.11"
+indicatif = "0.17"
+walkdir = "2"
+phf = { version = "0.11", features = ["macros"] }
+trash = "5"
+which = "6"
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+humansize = "2"
+glob = "0.3"
+libc = "0.2"
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+phf_codegen = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true

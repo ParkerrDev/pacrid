@@ -1,0 +1,12 @@
+{
+  "name": "Steam",
+  "executables": ["steam", "steam-runtime"],
+  "locations": [
+    {"file": "$HOME/.steam"},
+    {"file": "$HOME/.steampath"},
+    {"file": "$HOME/.steampid"},
+    {"file": "$XDG_DATA_HOME/Steam"},
+    {"file": "$XDG_CONFIG_HOME/steam"},
+    {"file": "$XDG_CACHE_HOME/steam"}
+  ]
+}
