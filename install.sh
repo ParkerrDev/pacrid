@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # pacrid installer — builds from source and installs the pacman hook.
-# Usage: curl -sSf https://raw.githubusercontent.com/sauccydev/pacrid/main/install.sh | bash
-set -euo pipefail
+# Usage: curl -sSf https://raw.githubusercontent.com/ParkerrDev/pacrid/refs/heads/master/install.sh | bash
+# set -euo pipefail
 
-REPO_URL="https://github.com/sauccydev/pacrid"
+REPO_URL="https://github.com/ParkerrDev/pacrid"
 BINARY_DEST="/usr/bin/pacrid"
 HOOK_DEST="/usr/share/libalpm/hooks/pacrid.hook"
 JOURNAL_DIR="/var/lib/pacrid/journal"
