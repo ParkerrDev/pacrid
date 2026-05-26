@@ -5,10 +5,11 @@
 When you uninstall a package, pacman deletes its binaries - but your configuration files, caches, and data directories are intentionally left alone. Over time these accumulate invisibly: `~/.config/steam`, `~/.cache/discord`, `~/.local/share/kiwix-desktop`. pacrid fixes this with a pacman `PostTransaction` hook that automatically finds and removes orphaned files every time you uninstall a package, with no manual steps required.
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/ParkerrDev/pacrid/refs/heads/master/install.sh | bash
+curl -sSf https://raw.githubusercontent.com/ParkerrDev/pacrid/refs/heads/master/install.sh | bash -s -- --binary
 ```
 
 > Arch Linux only. Works transparently with `pacman`, `paru`, `yay`, and any pacman wrapper.
+> Prefer to build it yourself? Drop the `-s -- --binary` and the installer will compile from source.
 
 ---
 
@@ -89,18 +90,28 @@ Every deletion is written to the journal at `/var/lib/pacrid/journal/<timestamp>
 
 ### One-line installer (recommended)
 
+Downloads a prebuilt binary from the [latest GitHub Release](https://github.com/ParkerrDev/pacrid/releases/latest), verifies its SHA256, and installs the pacman hook. No Rust toolchain required.
+
 ```bash
-curl -sSf https://raw.githubusercontent.com/ParkerrDev/pacrid/refs/heads/master/install.sh | bash
+curl -sSf https://raw.githubusercontent.com/ParkerrDev/pacrid/refs/heads/master/install.sh | bash -s -- --binary
 ```
 
 The script will:
 1. Verify you are on Arch Linux
-2. Install Rust via rustup if `cargo` is not on your PATH
-3. Clone the repository to a temporary directory (or build in-place if you're already in it)
-4. Build a release binary (`--release`, LTO, stripped)
+2. Detect your architecture (`x86_64` or `aarch64`) and pick the matching release tarball
+3. Download it from `releases/latest/download/pacrid-<arch>-linux.tar.gz`
+4. Verify the published SHA256 checksum
 5. Install the binary to `/usr/bin/pacrid`
 6. Install the pacman hook to `/usr/share/libalpm/hooks/pacrid.hook`
 7. Create `/var/lib/pacrid/journal/`
+
+### One-line installer (build from source)
+
+Drop the `--binary` flag to compile locally instead. The script will install Rust via rustup if needed.
+
+```bash
+curl -sSf https://raw.githubusercontent.com/ParkerrDev/pacrid/refs/heads/master/install.sh | bash
+```
 
 ### Build from source manually
 
