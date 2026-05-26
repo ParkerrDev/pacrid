@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Leftover-file reaper for Arch Linux"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/sauccydev/pacrid"
+repository = "https://github.com/ParkerrDev/pacrid"
 rust-version = "1.80"
 
 [[bin]]

@@ -1,10 +1,10 @@
-# Maintainer: Parker <sauccydev@gmail.com>
+# Maintainer: Parker <email@parkerhunt.me>
 pkgname=pacrid
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Leftover-file reaper for Arch Linux — removes ~/.config and other cruft after pacman -Rns"
 arch=('x86_64' 'aarch64')
-url="https://github.com/sauccydev/pacrid"
+url="https://github.com/ParkerrDev/pacrid"
 license=('GPL3')
 depends=('gcc-libs' 'glibc')
 makedepends=('rust' 'cargo' 'git')

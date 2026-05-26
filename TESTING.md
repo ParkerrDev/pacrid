@@ -16,7 +16,7 @@ Use a clean Arch Linux VM (or container) to test end-to-end.
 
 ```sh
 # 1. Build and install pacrid
-git clone https://github.com/sauccydev/pacrid
+git clone https://github.com/ParkerrDev/pacrid
 cd pacrid
 makepkg -si
 
