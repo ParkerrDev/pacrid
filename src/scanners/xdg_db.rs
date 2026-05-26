@@ -22,14 +22,18 @@ impl Scanner for XdgDbScanner {
             "scan called with no removed packages"
         );
 
-        let mut findings = Vec::new();
+        // Capacity heuristic: most XDG entries declare 1-4 locations.
+        // Pre-reserve to bound heap churn during the scan.
+        let mut findings = Vec::with_capacity(ctx.removed_packages.len().saturating_mul(4));
 
         for pkg in &ctx.removed_packages {
             if ctx.config.ignore.packages.contains(pkg) {
                 continue;
             }
 
-            let Some(entry) = lookup_xdg_entry(pkg) else { continue };
+            let Some(entry) = lookup_xdg_entry(pkg) else {
+                continue;
+            };
 
             let exe_gone = executable_gone(entry.executables);
             if !exe_gone {
@@ -42,7 +46,15 @@ impl Scanner for XdgDbScanner {
 
             for location in entry.locations {
                 let path = expand_xdg_with_home(location.path, &ctx.home_dir);
-                process_path(path, pkg, entry.executables, exe_gone, &ctx.config, &ctx.home_dir, &mut findings);
+                process_path(
+                    path,
+                    pkg,
+                    entry.executables,
+                    exe_gone,
+                    &ctx.config,
+                    &ctx.home_dir,
+                    &mut findings,
+                );
             }
         }
 
@@ -55,7 +67,9 @@ fn lookup_xdg_entry(pkg: &str) -> Option<&'static XdgEntry> {
     let stripped = strip_aur_suffix(&lower);
 
     // Try exact match first, then stripped suffix.
-    XDB_MAP.get(lower.as_str()).or_else(|| XDB_MAP.get(stripped.as_str()))
+    XDB_MAP
+        .get(lower.as_str())
+        .or_else(|| XDB_MAP.get(stripped.as_str()))
 }
 
 fn process_path(

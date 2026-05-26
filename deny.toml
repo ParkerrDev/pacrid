@@ -1,0 +1,73 @@
+# cargo-deny configuration — supply-chain policy enforced in CI.
+# See https://embarkstudios.github.io/cargo-deny/ for full schema.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+
+[advisories]
+# RUSTSEC advisory database — fail on any unaddressed vulnerability or
+# unmaintained crate. New advisories that appear after this commit will
+# turn the build red the moment they are published.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Explicit allowlist. Anything not on this list will fail the build, forcing
+# a deliberate decision before a new license enters the dependency tree.
+# `unused-allowed-license = "allow"` keeps the list a stable contract — we
+# don't want to revisit it every time a dep drops or rotates a sub-license.
+unused-allowed-license = "allow"
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    # pacrid is itself GPL-3.0-or-later, so depending on GPL'd crates is fine.
+    "GPL-3.0",
+    "GPL-3.0-or-later",
+    "LGPL-3.0",
+    "LGPL-3.0-or-later",
+    "0BSD",
+]
+exceptions = []
+
+[bans]
+# Reject multiple major versions of the same crate (they bloat the binary,
+# slow compile, and signal an out-of-date dependency graph).
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Crates we never want, even transitively.
+deny = [
+    # openssl-sys pulls in a C library; rustls is the safe-Rust alternative.
+    # (Currently we don't use either, but lock it down for future safety.)
+    { name = "openssl-sys" },
+]
+# Known-acceptable duplicate versions: `which` 6.x still pulls rustix 0.38
+# while `tempfile` is on rustix 1.x. Both are well-audited crates from the
+# same author, and the duplicate goes away when `which` releases its 7.x.
+skip = [
+    { name = "rustix" },
+    { name = "linux-raw-sys" },
+]
+skip-tree = []
+
+[sources]
+# Only allow crates.io as a source — no git or alternative registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    name: fmt + clippy + test + safety-rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Reproducibility is anchored by Cargo.lock (every dependency pinned),
+        # not by a specific compiler patch — the latest stable Rust is fine.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (zero warnings)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Project safety rules
+        run: ./scripts/check-rules.sh
+
+  audit:
+    name: cargo-audit (RUSTSEC advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    name: cargo-deny (license + supply chain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources advisories
+
+  miri:
+    name: Miri (UB detection on unsafe)
+    runs-on: ubuntu-latest
+    # Miri requires nightly. A Miri failure surfaces UB in any reachable
+    # unsafe block but does not block merge.
+    continue-on-error: true
+    # RUSTUP_TOOLCHAIN pins the toolchain for every cargo invocation in this
+    # job, including subprocesses Miri spawns internally. This prevents the
+    # default toolchain from being picked up unexpectedly.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      MIRIFLAGS: "-Zmiri-disable-isolation"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: Miri setup
+        run: cargo miri setup
+      - name: Miri test
+        run: cargo miri test --lib --locked

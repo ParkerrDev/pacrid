@@ -2,7 +2,7 @@ use crate::config;
 use crate::executor::{execute, DeleteMode};
 use crate::pacman::db::PacmanDb;
 use crate::review::interactive_review;
-use crate::scanners::{Scanner, ScanContext};
+use crate::scanners::{ScanContext, Scanner};
 use crate::user_homes::user_homes_to_scan;
 use std::io::{self, BufRead};
 
@@ -13,12 +13,18 @@ use std::io::{self, BufRead};
 /// - Sets `PACRID_IN_HOOK=1` for child invocations to prevent recursion.
 /// - Bails early if already inside a hook invocation.
 pub fn run_hook(dry_run: bool, non_interactive: bool) -> anyhow::Result<()> {
-    // Safety invariant: recursion guard.
+    // Recursion guard: pacman hook fires for every transaction, so a child
+    // process spawned by pacrid (e.g. via a scanner) that itself triggers
+    // pacman would loop forever. The env var prevents that.
     if std::env::var("PACRID_IN_HOOK").is_ok() {
         tracing::debug!("PACRID_IN_HOOK set — bailing to prevent recursion");
         return Ok(());
     }
-    // Safety invariant: set before any child process is spawned.
+    // SAFETY: set_var is unsafe in Rust 1.81+ because concurrent reads from
+    // other threads could observe a torn write. We call it here at the very
+    // start of the hook, before any threads are spawned and before any
+    // library code reads the environment. No aliasing or lifetime invariant
+    // is at risk.
     unsafe { std::env::set_var("PACRID_IN_HOOK", "1") };
 
     let cfg = config::load();
@@ -36,9 +42,12 @@ pub fn run_hook(dry_run: bool, non_interactive: bool) -> anyhow::Result<()> {
 
     tracing::info!("hook triggered for packages: {:?}", packages);
 
-    let result = std::panic::catch_unwind(|| {
-        run_hook_inner(&packages, &cfg, dry_run, non_interactive)
-    });
+    // Defensive isolation, not control flow: the pacman PostTransaction hook
+    // must never abort the parent pacman process. If anything inside the
+    // scanner pipeline panics we log it and exit cleanly. Errors via Result
+    // are the normal path; this only catches unexpected panics.
+    let result =
+        std::panic::catch_unwind(|| run_hook_inner(&packages, &cfg, dry_run, non_interactive));
 
     match result {
         Ok(inner_result) => {
@@ -151,7 +160,9 @@ fn read_packages_from_stdin() -> anyhow::Result<Vec<String>> {
         if !trimmed.is_empty() {
             packages.push(trimmed);
         }
-        line_count += 1;
+        // saturating_add: line_count is bounded above by the explicit guard
+        // below, so saturating arithmetic is correct and cannot wrap.
+        line_count = line_count.saturating_add(1);
         // Safety invariant: bound the loop.
         if line_count > 10_000 {
             tracing::warn!("stdin exceeded 10000 lines — truncating");

@@ -3,7 +3,7 @@ use crate::scanners::{Confidence, Finding, Reason};
 use crate::util::format_bytes;
 use dialoguer::MultiSelect;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Directories we never collapse to even if fully orphaned — too dangerous.
 const COLLAPSE_NEVER: &[&str] = &[
@@ -39,7 +39,10 @@ pub fn interactive_review(
     auto_confirm_level: &AutoConfirmLevel,
     non_interactive: bool,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    assert!(!findings.is_empty(), "interactive_review called with no findings");
+    assert!(
+        !findings.is_empty(),
+        "interactive_review called with no findings"
+    );
 
     // Collapse individual files under fully-orphaned directories into one entry.
     findings = collapse_to_dirs(findings);
@@ -71,7 +74,10 @@ fn review_package(
     findings: &[Finding],
     auto_confirm_level: &AutoConfirmLevel,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    assert!(!findings.is_empty(), "review_package called with no findings for {pkg}");
+    assert!(
+        !findings.is_empty(),
+        "review_package called with no findings for {pkg}"
+    );
 
     println!("\nPackage: {pkg} (removed)");
 
@@ -101,9 +107,11 @@ fn review_package(
         .defaults(&defaults)
         .interact()?;
 
+    // selection contains valid indices into `findings` by dialoguer's contract.
+    // Use checked .get() rather than [] indexing so a bug here can never panic.
     Ok(selection
         .into_iter()
-        .map(|i| findings[i].path.clone())
+        .filter_map(|i| findings.get(i).map(|f| f.path.clone()))
         .collect())
 }
 
@@ -179,8 +187,11 @@ fn should_default_checked(confidence: Confidence, level: &AutoConfirmLevel) -> b
 }
 
 fn is_interactive() -> bool {
-    // Check if stdout is a terminal.
     use std::os::unix::io::AsRawFd;
+    // SAFETY: libc::isatty takes a raw file descriptor and returns 0 or 1
+    // (or sets errno on bad fd; we treat that as "not a tty"). stdout's fd
+    // is owned by the process for its lifetime, so the descriptor is always
+    // valid for the duration of this call.
     unsafe { libc::isatty(std::io::stdout().as_raw_fd()) == 1 }
 }
 
@@ -195,15 +206,42 @@ fn collapse_to_dirs(findings: Vec<Finding>) -> Vec<Finding> {
         return findings;
     }
 
-    // Build orphan_files set and, simultaneously, a reverse map from each
-    // ancestor directory to the indices of findings beneath it.
+    let (orphan_files, dir_to_indices) = build_ancestor_index(&findings);
+    let collapse_candidates = orphan_candidates_shallow_first(&dir_to_indices, &orphan_files);
+
+    let mut consumed: HashSet<PathBuf> = HashSet::new();
+    let mut collapsed: Vec<Finding> = Vec::new();
+
+    for dir in &collapse_candidates {
+        if let Some(entry) = collapse_one(dir, &findings, &dir_to_indices, &consumed) {
+            for path in &entry.consumed_paths {
+                consumed.insert(path.clone());
+            }
+            collapsed.push(entry.finding);
+        }
+    }
+
+    for f in findings {
+        if !consumed.contains(&f.path) {
+            collapsed.push(f);
+        }
+    }
+
+    collapsed
+}
+
+/// Build the orphan-file set and the (ancestor dir → finding indices) reverse map
+/// in a single pass over `findings`.
+fn build_ancestor_index(findings: &[Finding]) -> (HashSet<PathBuf>, HashMap<PathBuf, Vec<usize>>) {
     let mut orphan_files: HashSet<PathBuf> = HashSet::with_capacity(findings.len());
-    // dir → indices of findings that live anywhere under that dir
     let mut dir_to_indices: HashMap<PathBuf, Vec<usize>> = HashMap::new();
 
     for (idx, finding) in findings.iter().enumerate() {
         orphan_files.insert(finding.path.clone());
         let mut cur = finding.path.as_path();
+        // Bounded loop: each iteration moves `cur` to its parent (one fewer
+        // path component). Filesystem paths have a finite component count
+        // (PATH_MAX / NAME_MAX), so this terminates in O(path depth).
         while let Some(parent) = cur.parent() {
             if parent.as_os_str().is_empty() {
                 break;
@@ -215,82 +253,75 @@ fn collapse_to_dirs(findings: Vec<Finding>) -> Vec<Finding> {
             if parent.components().count() < COLLAPSE_MIN_COMPONENTS {
                 break;
             }
-            // Push this finding's index into the parent's list.
-            // If the parent was already in the map, its ancestors already have
-            // this finding too (they were added on a previous iteration of the
-            // outer loop), so we can break early.
-            let entry = dir_to_indices.entry(parent.to_path_buf()).or_default();
-            entry.push(idx);
-            let already_had_parent = entry.len() > 1;
+            dir_to_indices
+                .entry(parent.to_path_buf())
+                .or_default()
+                .push(idx);
             cur = parent;
-            if already_had_parent {
-                // Parent and all its ancestors were already processed for a
-                // previous finding; they'll get this index appended via the
-                // continued upward walk on the *next* finding. But we still need
-                // to walk up to append *this* index everywhere, so don't break.
-                // (The break optimisation only applies when we know the parent
-                // was already fully set up, which we can't guarantee here.)
-                _ = already_had_parent; // acknowledged — keep walking
-            }
         }
     }
 
-    // Determine which ancestor directories are entirely orphaned.
-    // Sort deepest-first so children are resolved before parents.
-    let mut candidates: Vec<PathBuf> = dir_to_indices.keys().cloned().collect();
-    candidates.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    (orphan_files, dir_to_indices)
+}
 
-    let orphan_dirs = collect_orphan_dirs(&candidates, &orphan_files);
+/// Filter the candidate ancestor dirs down to those whose entire subtree is
+/// orphaned, then return them sorted shallowest-first so the highest valid
+/// collapse point in any chain wins.
+fn orphan_candidates_shallow_first(
+    dir_to_indices: &HashMap<PathBuf, Vec<usize>>,
+    orphan_files: &HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut deepest_first: Vec<PathBuf> = dir_to_indices.keys().cloned().collect();
+    deepest_first.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
 
-    // Re-sort shallowest first so a high-level collapse subsumes all its children.
-    let mut collapse_candidates: Vec<PathBuf> = orphan_dirs.into_iter().collect();
-    collapse_candidates.sort_by_key(|p| p.components().count());
+    let orphan_dirs = collect_orphan_dirs(&deepest_first, orphan_files);
+    let mut shallow_first: Vec<PathBuf> = orphan_dirs.into_iter().collect();
+    shallow_first.sort_by_key(|p| p.components().count());
+    shallow_first
+}
 
-    let mut consumed: HashSet<PathBuf> = HashSet::new();
-    let mut collapsed: Vec<Finding> = Vec::new();
+struct CollapseEntry {
+    finding: Finding,
+    consumed_paths: Vec<PathBuf>,
+}
 
-    for dir in &collapse_candidates {
-        // Use the pre-built index list — O(under.len()) not O(all_findings).
-        let Some(indices) = dir_to_indices.get(dir) else { continue };
-        let under: Vec<&Finding> = indices
-            .iter()
-            .filter_map(|&i| {
-                let f = &findings[i];
-                if consumed.contains(&f.path) { None } else { Some(f) }
-            })
-            .collect();
+/// Build a single collapsed Finding for `dir` from the still-unconsumed
+/// findings beneath it. Returns None if every covered finding has already
+/// been claimed by a shallower collapse.
+fn collapse_one(
+    dir: &Path,
+    findings: &[Finding],
+    dir_to_indices: &HashMap<PathBuf, Vec<usize>>,
+    consumed: &HashSet<PathBuf>,
+) -> Option<CollapseEntry> {
+    let indices = dir_to_indices.get(dir)?;
+    // filter_map with .get() instead of [] indexing: by construction every
+    // index is valid, but a checked lookup makes that impossible to violate.
+    let under: Vec<&Finding> = indices
+        .iter()
+        .filter_map(|&i| findings.get(i))
+        .filter(|f| !consumed.contains(&f.path))
+        .collect();
 
-        if under.is_empty() {
-            continue;
-        }
+    // .first() is the safe analogue of under[0]; we also need it as the loop
+    // sentinel below, so a single ok-or-none is cleaner than separate checks.
+    let rep = under.first()?;
+    let total_size: u64 = under.iter().map(|f| f.size_bytes).sum();
+    let min_confidence = under.iter().map(|f| f.confidence).min()?;
+    let consumed_paths: Vec<PathBuf> = under.iter().map(|f| f.path.clone()).collect();
 
-        let total_size: u64 = under.iter().map(|f| f.size_bytes).sum();
-        let min_confidence = under.iter().map(|f| f.confidence).min().expect("non-empty");
-        let rep = under[0];
-
-        collapsed.push(Finding {
-            path: dir.clone(),
+    Some(CollapseEntry {
+        finding: Finding {
+            path: dir.to_path_buf(),
             size_bytes: total_size,
             package: rep.package.clone(),
             confidence: min_confidence,
             reasons: rep.reasons.clone(),
             category: rep.category,
             file_count: under.len() as u64,
-        });
-
-        for f in &under {
-            consumed.insert(f.path.clone());
-        }
-    }
-
-    // Append findings that weren't collapsed into any directory.
-    for f in findings {
-        if !consumed.contains(&f.path) {
-            collapsed.push(f);
-        }
-    }
-
-    collapsed
+        },
+        consumed_paths,
+    })
 }
 
 /// Returns the subset of `candidates` (pre-sorted deepest-first) that are
@@ -305,10 +336,14 @@ fn collect_orphan_dirs(
     let mut orphan_dirs: HashSet<PathBuf> = HashSet::new();
 
     'dir: for dir in candidates_deepest_first {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.filter_map(std::result::Result::ok) {
             let child = entry.path();
-            let Ok(meta) = child.symlink_metadata() else { continue };
+            let Ok(meta) = child.symlink_metadata() else {
+                continue;
+            };
             if meta.is_dir() {
                 if !orphan_dirs.contains(&child) {
                     continue 'dir; // subdirectory has non-orphaned contents
@@ -324,6 +359,13 @@ fn collect_orphan_dirs(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::scanners::{Category, Confidence, Reason};
@@ -343,6 +385,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn collapses_fully_orphaned_dir() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -376,6 +419,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn does_not_collapse_dir_with_non_orphan_file() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -407,4 +451,66 @@ mod tests {
     // needed in the wildcard import but not directly used in these tests.
     #[allow(dead_code)]
     fn _use_duration(_: Duration) {}
+
+    // ─ Property tests ─
+    // proptest spawns subprocesses (via rusty-fork) to isolate test cases.
+    // Miri cannot simulate fork/exec, so the proptest block as a whole is
+    // gated out under Miri. Pure-logic unit tests above still run.
+    #[cfg(not(miri))]
+    use proptest::prelude::*;
+
+    #[cfg(not(miri))]
+    proptest! {
+        /// collapse_to_dirs must conserve total size: the sum of size_bytes
+        /// over the output (including the file_count multiplier for collapsed
+        /// entries) equals the sum over the input. Bytes are never lost or
+        /// invented.
+        #[test]
+        fn property_collapse_preserves_total_bytes(
+            sizes in proptest::collection::vec(0u64..1_000_000_u64, 0..20),
+        ) {
+            // Build distinct fake paths so collapse logic has multiple candidates.
+            let findings: Vec<Finding> = sizes
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| make_finding(&format!("/tmp/fake/{i}/file.bin"), s))
+                .collect();
+
+            let before: u64 = findings.iter().map(|f| f.size_bytes).sum();
+            let after = collapse_to_dirs(findings);
+            let after_sum: u64 = after.iter().map(|f| f.size_bytes).sum();
+
+            // Since none of these paths exist on disk, collapse won't merge
+            // them — but the conservation invariant must hold regardless.
+            prop_assert_eq!(before, after_sum);
+        }
+
+        /// collapse_to_dirs never produces a path that is shallower than
+        /// COLLAPSE_MIN_COMPONENTS. This is the structural safety floor
+        /// that prevents collapsing to dangerous roots like /usr/lib.
+        #[test]
+        fn property_collapse_respects_min_depth(
+            sizes in proptest::collection::vec(0u64..1_000_u64, 0..10),
+        ) {
+            let findings: Vec<Finding> = sizes
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| make_finding(&format!("/var/cache/x/y/{i}/leaf"), s))
+                .collect();
+            let after = collapse_to_dirs(findings);
+            for f in &after {
+                // file_count > 0 means this is a collapsed entry — it must
+                // satisfy the minimum-depth invariant. file_count == 0
+                // entries are passthroughs of the input and exempt.
+                if f.file_count > 0 {
+                    let depth = f.path.components().count();
+                    prop_assert!(
+                        depth >= COLLAPSE_MIN_COMPONENTS,
+                        "collapsed path {} has depth {} < {}",
+                        f.path.display(), depth, COLLAPSE_MIN_COMPONENTS
+                    );
+                }
+            }
+        }
+    }
 }

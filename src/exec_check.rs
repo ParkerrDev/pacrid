@@ -39,16 +39,27 @@ pub fn strip_aur_suffix(name: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
+    // executable_gone -> which::which -> access() syscall, which Miri does
+    // not implement. Skip under Miri; full coverage still runs in cargo test.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn cargo_is_present() {
         // `cargo` is guaranteed to be on PATH in the build environment.
         assert!(!executable_gone(&["cargo".to_owned()]));
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn nonexistent_binary_is_gone() {
         assert!(executable_gone(&["__pacrid_no_such_exe__".to_owned()]));
     }

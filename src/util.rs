@@ -11,7 +11,9 @@ pub fn compute_size(path: &Path) -> u64 {
     assert!(!path.as_os_str().is_empty(), "path must not be empty");
 
     // Use symlink_metadata so we never follow symlinks.
-    let Ok(meta) = path.symlink_metadata() else { return 0 };
+    let Ok(meta) = path.symlink_metadata() else {
+        return 0;
+    };
 
     if meta.is_symlink() || meta.is_file() {
         return meta.len();
@@ -68,6 +70,13 @@ pub fn expand_xdg(path: &str) -> std::path::PathBuf {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -78,6 +87,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn compute_size_nonexistent_returns_zero() {
         assert_eq!(compute_size(Path::new("/nonexistent/path/abc")), 0);
     }

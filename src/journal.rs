@@ -36,7 +36,10 @@ impl JournalEntry {
     }
 
     pub fn add_action(&mut self, original: PathBuf, moved_to: String, size: u64) {
-        assert!(!original.as_os_str().is_empty(), "original path must not be empty");
+        assert!(
+            !original.as_os_str().is_empty(),
+            "original path must not be empty"
+        );
         self.actions.push(JournalAction {
             original,
             moved_to,
@@ -56,12 +59,17 @@ fn journal_dir() -> PathBuf {
 }
 
 fn nix_is_root() -> bool {
-    // SAFETY: getuid() is always safe.
+    // SAFETY: libc::getuid() is a POSIX call with no preconditions, no
+    // side effects, and a defined-for-all-processes return value. It cannot
+    // fail or invalidate any Rust aliasing/lifetime invariants.
     unsafe { libc::getuid() == 0 }
 }
 
 pub fn write_entry(entry: &JournalEntry) -> anyhow::Result<PathBuf> {
-    assert!(!entry.actions.is_empty(), "refusing to write empty journal entry");
+    assert!(
+        !entry.actions.is_empty(),
+        "refusing to write empty journal entry"
+    );
 
     let dir = journal_dir();
     std::fs::create_dir_all(&dir)
@@ -89,6 +97,13 @@ pub fn read_entry(id: &str) -> anyhow::Result<JournalEntry> {
 
 pub fn list_entries() -> anyhow::Result<Vec<JournalEntry>> {
     let dir = journal_dir();
+    // Invariant: journal_dir() always returns an absolute path. If this ever
+    // failed it would indicate a regression in journal_dir or its inputs.
+    assert!(
+        dir.is_absolute(),
+        "journal_dir() must return an absolute path, got {}",
+        dir.display()
+    );
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -107,11 +122,25 @@ pub fn list_entries() -> anyhow::Result<Vec<JournalEntry>> {
             .with_context(|| format!("reading {}", path.display()))?;
         match serde_json::from_str::<JournalEntry>(&content) {
             Ok(e) => entries.push(e),
-            Err(err) => tracing::warn!("skipping malformed journal entry {}: {err}", path.display()),
+            Err(err) => {
+                tracing::warn!("skipping malformed journal entry {}: {err}", path.display());
+            }
         }
     }
 
     entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+    // Post-condition: sort_by_key on Reverse(timestamp) guarantees newest first.
+    // windows(2) always yields slices of length 2, so first/get are total, but
+    // we phrase the predicate without [] indexing to satisfy clippy::indexing_slicing.
+    assert!(
+        entries.windows(2).all(|w| {
+            let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
+                return true;
+            };
+            a.timestamp >= b.timestamp
+        }),
+        "list_entries postcondition: entries must be sorted newest-first"
+    );
     Ok(entries)
 }
 
@@ -132,16 +161,23 @@ pub fn sanitize_path_for_quarantine(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
+    // JournalEntry::new calls chrono::Utc::now -> clock_gettime, which Miri
+    // doesn't implement on Linux. The serde round-trip itself is pure but
+    // can't run without a valid entry.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn journal_entry_round_trip() {
         let mut entry = JournalEntry::new("test", vec!["steam".to_owned()]);
-        entry.add_action(
-            PathBuf::from("/home/u/.steam"),
-            "trash://".to_owned(),
-            1234,
-        );
+        entry.add_action(PathBuf::from("/home/u/.steam"), "trash://".to_owned(), 1234);
 
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: JournalEntry = serde_json::from_str(&json).unwrap();

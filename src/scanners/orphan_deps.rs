@@ -10,7 +10,9 @@ pub fn list_orphans() -> anyhow::Result<Vec<String>> {
 pub fn remove_orphans(packages: &[String], dry_run: bool) -> anyhow::Result<()> {
     assert!(!packages.is_empty(), "packages list must not be empty");
     assert!(
-        packages.iter().all(|p| !p.contains(';') && !p.contains('&') && !p.contains('|')),
+        packages
+            .iter()
+            .all(|p| !p.contains(';') && !p.contains('&') && !p.contains('|')),
         "package names must not contain shell metacharacters"
     );
 

@@ -7,6 +7,7 @@ pub mod pacman_orphan;
 pub mod xdg_db;
 
 #[derive(Debug, Clone)]
+#[must_use = "a Finding describes a deletion candidate — discarding it silently drops it from the review"]
 pub struct Finding {
     pub path: PathBuf,
     pub size_bytes: u64,

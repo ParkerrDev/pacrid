@@ -18,7 +18,11 @@ impl PacmanDb {
 
     /// Load from an alternative directory (for testing).
     pub fn load_from(local_dir: &Path) -> anyhow::Result<Self> {
-        assert!(local_dir.is_dir(), "pacman local db dir must exist: {}", local_dir.display());
+        assert!(
+            local_dir.is_dir(),
+            "pacman local db dir must exist: {}",
+            local_dir.display()
+        );
 
         let mut owned: HashSet<PathBuf> = HashSet::new();
         let mut pkg_count: usize = 0;
@@ -37,7 +41,9 @@ impl PacmanDb {
                 continue;
             }
             parse_files_into(&files_path, &mut owned)?;
-            pkg_count += 1;
+            // saturating_add: only used for the diagnostic log line below,
+            // never as an index — overflow would simply cap the displayed count.
+            pkg_count = pkg_count.saturating_add(1);
         }
 
         assert!(
@@ -45,7 +51,11 @@ impl PacmanDb {
             "expected at least one package in real pacman db"
         );
 
-        tracing::debug!("loaded pacman db: {} packages, {} paths", pkg_count, owned.len());
+        tracing::debug!(
+            "loaded pacman db: {} packages, {} paths",
+            pkg_count,
+            owned.len()
+        );
         Ok(Self { owned })
     }
 
@@ -69,8 +79,8 @@ impl PacmanDb {
 ///   usr/lib/foo.so
 ///   (paths without leading slash — we add it)
 fn parse_files_into(path: &Path, out: &mut HashSet<PathBuf>) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
     let mut in_files = false;
     for line in content.lines() {
@@ -94,6 +104,13 @@ fn parse_files_into(path: &Path, out: &mut HashSet<PathBuf>) -> anyhow::Result<(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use std::fs;
@@ -111,6 +128,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn parses_fixture_correctly() {
         let tmp = TempDir::new().unwrap();
         make_fixture(
@@ -126,6 +144,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn ignores_non_files_sections() {
         let tmp = TempDir::new().unwrap();
         let pkg_dir = tmp.path().join("pkg-1.0");

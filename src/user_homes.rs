@@ -35,7 +35,10 @@ pub fn user_homes_to_scan() -> Vec<PathBuf> {
 
     // Last resort: whatever HOME says, even if it's /root.
     let fallback = std::env::var("HOME").map_or_else(|_| PathBuf::from("/root"), PathBuf::from);
-    tracing::warn!("could not detect real user home; falling back to {}", fallback.display());
+    tracing::warn!(
+        "could not detect real user home; falling back to {}",
+        fallback.display()
+    );
     vec![fallback]
 }
 
@@ -102,7 +105,9 @@ fn home_from_passwd_uid(uid: u32) -> Option<PathBuf> {
 
 /// Return home directories for all human users (UID 1000–59999).
 fn all_human_homes() -> Vec<PathBuf> {
-    let Ok(passwd) = std::fs::read_to_string("/etc/passwd") else { return Vec::new() };
+    let Ok(passwd) = std::fs::read_to_string("/etc/passwd") else {
+        return Vec::new();
+    };
     let mut homes = Vec::new();
     for line in passwd.lines() {
         let mut f = line.splitn(7, ':');
@@ -131,10 +136,18 @@ fn all_human_homes() -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn all_human_homes_is_non_empty() {
         // On any real system there should be at least one human user home.
         // In CI this may be empty; just confirm it doesn't panic.
@@ -144,6 +157,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn home_from_passwd_name_finds_root() {
         // root is always in /etc/passwd and has uid=0 but this tests the parsing path.
         let home = home_from_passwd_name("root");

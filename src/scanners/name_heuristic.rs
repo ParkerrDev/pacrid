@@ -24,7 +24,10 @@ impl Scanner for NameHeuristicScanner {
         let xdg_data = format!("{home}/.local/share");
         let xdg_state = format!("{home}/.local/state");
 
-        let mut findings = Vec::new();
+        // Capacity heuristic: ~8 candidate paths per package per name variant.
+        // Pre-reserving avoids reallocation as findings accumulate (Rule 3
+        // partial compliance — bound the heap churn).
+        let mut findings = Vec::with_capacity(ctx.removed_packages.len().saturating_mul(8));
 
         for pkg in &ctx.removed_packages {
             if ctx.config.ignore.packages.contains(pkg) {
@@ -66,7 +69,10 @@ impl Scanner for NameHeuristicScanner {
             for extra_root in &ctx.config.scan_paths_extra {
                 for name in &names_to_try {
                     let candidate = extra_root.join(name);
-                    let reasons = vec![Reason::ExactNameMatch, Reason::ExecutableGone(exe_gone_name.clone())];
+                    let reasons = vec![
+                        Reason::ExactNameMatch,
+                        Reason::ExecutableGone(exe_gone_name.clone()),
+                    ];
                     if let Some(f) = probe(
                         &candidate,
                         pkg,
@@ -140,69 +146,135 @@ fn check_home_paths(
         (xdg_state, Category::State),
     ];
 
-    for (base, category) in home_candidates {
+    check_xdg_direct(
+        name,
+        pkg,
+        exe_gone_name,
+        home_candidates,
+        config,
+        home_dir,
+        findings,
+    );
+    check_xdg_vendor_nested(
+        name,
+        pkg,
+        exe_gone_name,
+        home_candidates,
+        config,
+        home_dir,
+        findings,
+    );
+    check_dotfiles(name, pkg, exe_gone_name, home, config, home_dir, findings);
+    check_system_paths(name, pkg, config, home_dir, findings);
+}
+
+/// Direct XDG check: ~/.config/<name>, ~/.cache/<name>, etc.
+fn check_xdg_direct(
+    name: &str,
+    pkg: &str,
+    exe_gone_name: &str,
+    candidates: &[(&str, Category)],
+    config: &crate::config::Config,
+    home_dir: &Path,
+    findings: &mut Vec<Finding>,
+) {
+    for (base, category) in candidates {
         let path = PathBuf::from(base).join(name);
-        let reasons = vec![Reason::ExactNameMatch, Reason::ExecutableGone(exe_gone_name.to_owned())];
+        let reasons = vec![
+            Reason::ExactNameMatch,
+            Reason::ExecutableGone(exe_gone_name.to_owned()),
+        ];
         if let Some(f) = probe(&path, pkg, reasons, *category, config, home_dir) {
             findings.push(f);
         }
     }
+}
 
-    // Vendor-namespaced subdirectories: catch paths like
-    // ~/.config/BraveSoftware/Brave-Origin-Nightly where the immediate XDG child
-    // is a vendor name and the package data lives one level deeper.
-    for (base, category) in home_candidates {
+/// One level deeper than XDG: catches `~/.config/BraveSoftware/Brave-Origin-Nightly`
+/// where the immediate XDG child is a vendor name and the app data lives nested.
+fn check_xdg_vendor_nested(
+    name: &str,
+    pkg: &str,
+    exe_gone_name: &str,
+    candidates: &[(&str, Category)],
+    config: &crate::config::Config,
+    home_dir: &Path,
+    findings: &mut Vec<Finding>,
+) {
+    for (base, category) in candidates {
         let xdg_root = Path::new(base);
-        let Ok(entries) = std::fs::read_dir(xdg_root) else { continue };
+        let Ok(entries) = std::fs::read_dir(xdg_root) else {
+            continue;
+        };
         for entry in entries.filter_map(std::result::Result::ok) {
-            // Use the cheap file_type from the DirEntry — no extra stat, and on
-            // Linux it reflects the symlink itself, matching the never-follow invariant.
+            // file_type from DirEntry is cheap and reflects the symlink itself
+            // on Linux, matching the never-follow invariant.
             let Ok(ft) = entry.file_type() else { continue };
             if !ft.is_dir() {
                 continue;
             }
             let nested = entry.path().join(name);
-            let reasons = vec![Reason::ExactNameMatch, Reason::ExecutableGone(exe_gone_name.to_owned())];
+            let reasons = vec![
+                Reason::ExactNameMatch,
+                Reason::ExecutableGone(exe_gone_name.to_owned()),
+            ];
             if let Some(f) = probe(&nested, pkg, reasons, *category, config, home_dir) {
                 findings.push(f);
             }
         }
     }
+}
 
-    // ~/.pkgname and ~/.pkgnamerc
+/// Legacy ~/.pkgname and ~/.pkgnamerc dotfiles.
+fn check_dotfiles(
+    name: &str,
+    pkg: &str,
+    exe_gone_name: &str,
+    home: &str,
+    config: &crate::config::Config,
+    home_dir: &Path,
+    findings: &mut Vec<Finding>,
+) {
     let dot_name = format!("{home}/.{name}");
     let dot_rc = format!("{home}/.{name}rc");
     for (path_str, cat) in &[(dot_name, Category::Config), (dot_rc, Category::Config)] {
         let path = Path::new(path_str);
-        let reasons = vec![Reason::ExactNameMatch, Reason::ExecutableGone(exe_gone_name.to_owned())];
+        let reasons = vec![
+            Reason::ExactNameMatch,
+            Reason::ExecutableGone(exe_gone_name.to_owned()),
+        ];
         if let Some(f) = probe(path, pkg, reasons, *cat, config, home_dir) {
             findings.push(f);
         }
     }
+}
 
-    // System paths — cap at Medium (state data, not safe to auto-remove at High).
-    let sys_medium: &[(&str, Category)] = &[
-        (&format!("/var/cache/{name}"), Category::Cache),
-        (&format!("/var/log/{name}"), Category::Cache),
-    ];
-    for (path_str, cat) in sys_medium {
-        let path = Path::new(path_str);
-        if let Some(mut f) = probe(path, pkg, vec![Reason::ExactNameMatch], *cat, config, home_dir) {
-            if f.confidence > crate::scanners::Confidence::Medium {
-                f.confidence = crate::scanners::Confidence::Medium;
-            }
-            findings.push(f);
-        }
-    }
-
-    // /etc/<name> variants — cap at Medium.
-    for (path_str, cat) in &[
+/// System paths: /var/cache, /var/log, /etc — capped at Medium.
+/// /var/lib — capped at Low (live state data, dangerous to auto-remove).
+fn check_system_paths(
+    name: &str,
+    pkg: &str,
+    config: &crate::config::Config,
+    home_dir: &Path,
+    findings: &mut Vec<Finding>,
+) {
+    let sys_medium: &[(String, Category)] = &[
+        (format!("/var/cache/{name}"), Category::Cache),
+        (format!("/var/log/{name}"), Category::Cache),
         (format!("/etc/{name}"), Category::Config),
         (format!("/etc/{name}.conf"), Category::Config),
         (format!("/etc/{name}.d"), Category::Config),
-    ] {
+    ];
+    for (path_str, cat) in sys_medium {
         let path = Path::new(path_str);
-        if let Some(mut f) = probe(path, pkg, vec![Reason::ExactNameMatch], *cat, config, home_dir) {
+        if let Some(mut f) = probe(
+            path,
+            pkg,
+            vec![Reason::ExactNameMatch],
+            *cat,
+            config,
+            home_dir,
+        ) {
             if f.confidence > crate::scanners::Confidence::Medium {
                 f.confidence = crate::scanners::Confidence::Medium;
             }
@@ -210,10 +282,16 @@ fn check_home_paths(
         }
     }
 
-    // /var/lib/<name> — always Low (state data, dangerous).
     let var_lib = format!("/var/lib/{name}");
     let path = Path::new(&var_lib);
-    if let Some(mut f) = probe(path, pkg, vec![Reason::ExactNameMatch], Category::State, config, home_dir) {
+    if let Some(mut f) = probe(
+        path,
+        pkg,
+        vec![Reason::ExactNameMatch],
+        Category::State,
+        config,
+        home_dir,
+    ) {
         f.confidence = crate::scanners::Confidence::Low;
         findings.push(f);
     }
@@ -251,6 +329,13 @@ fn probe(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::config::Config;
@@ -259,6 +344,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn finds_config_cache_dirs() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().to_str().unwrap().to_owned();
@@ -300,6 +386,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn finds_vendor_namespaced_dir() {
         // Mirrors the brave case shape but uses a fake vendor/app combo so the
         // executable_gone guard succeeds regardless of what's on PATH.
@@ -328,7 +415,9 @@ mod tests {
 
         let paths: Vec<_> = findings.iter().map(|f| f.path.to_str().unwrap()).collect();
         assert!(
-            paths.iter().any(|p| p.contains("FakeVendorCo/Fake-Origin-Nightly")),
+            paths
+                .iter()
+                .any(|p| p.contains("FakeVendorCo/Fake-Origin-Nightly")),
             "expected vendor-nested Fake dir in findings, got: {paths:?}"
         );
     }

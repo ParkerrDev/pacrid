@@ -7,18 +7,7 @@ use std::path::Path;
 /// Paths that are always forbidden — never delete these.
 /// Safety invariant: bare top-level paths are always refused.
 const FORBIDDEN_PREFIXES: &[&str] = &[
-    "/",
-    "/home",
-    "/root",
-    "/etc",
-    "/usr",
-    "/var",
-    "/boot",
-    "/proc",
-    "/sys",
-    "/run",
-    "/dev",
-    "/tmp",
+    "/", "/home", "/root", "/etc", "/usr", "/var", "/boot", "/proc", "/sys", "/run", "/dev", "/tmp",
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +17,7 @@ pub enum DeleteMode {
     Purge,
 }
 
+#[must_use = "ignoring an ExecutionResult drops both the success list and the journal pointer needed for undo"]
 pub struct ExecutionResult {
     pub succeeded: Vec<std::path::PathBuf>,
     pub failed: Vec<(std::path::PathBuf, String)>,
@@ -59,32 +49,16 @@ pub fn execute(
     let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string();
 
     for path in paths {
-        match validate_path(path, db) {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::warn!("refusing to delete {}: {e}", path.display());
-                failed.push((path.clone(), e.to_string()));
-                continue;
-            }
-        }
-
-        if dry_run {
-            tracing::info!("[dry-run] would delete: {}", path.display());
-            succeeded.push(path.clone());
-            continue;
-        }
-
-        let size = crate::util::compute_size(path);
-        match do_delete(path, mode, &timestamp) {
-            Ok(moved_to) => {
-                journal.add_action(path.clone(), moved_to, size);
-                succeeded.push(path.clone());
-            }
-            Err(e) => {
-                tracing::error!("failed to delete {}: {e}", path.display());
-                failed.push((path.clone(), e.to_string()));
-            }
-        }
+        process_one_path(
+            path,
+            db,
+            mode,
+            &timestamp,
+            dry_run,
+            &mut journal,
+            &mut succeeded,
+            &mut failed,
+        );
     }
 
     let journal_path = if !journal.actions.is_empty() && !dry_run {
@@ -103,9 +77,48 @@ pub fn execute(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn process_one_path(
+    path: &std::path::Path,
+    db: &PacmanDb,
+    mode: DeleteMode,
+    timestamp: &str,
+    dry_run: bool,
+    journal: &mut JournalEntry,
+    succeeded: &mut Vec<std::path::PathBuf>,
+    failed: &mut Vec<(std::path::PathBuf, String)>,
+) {
+    if let Err(e) = validate_path(path, db) {
+        tracing::warn!("refusing to delete {}: {e}", path.display());
+        failed.push((path.to_path_buf(), e.to_string()));
+        return;
+    }
+
+    if dry_run {
+        tracing::info!("[dry-run] would delete: {}", path.display());
+        succeeded.push(path.to_path_buf());
+        return;
+    }
+
+    let size = crate::util::compute_size(path);
+    match do_delete(path, mode, timestamp) {
+        Ok(moved_to) => {
+            journal.add_action(path.to_path_buf(), moved_to, size);
+            succeeded.push(path.to_path_buf());
+        }
+        Err(e) => {
+            tracing::error!("failed to delete {}: {e}", path.display());
+            failed.push((path.to_path_buf(), e.to_string()));
+        }
+    }
+}
+
 /// Restore a previous deletion from the journal.
 pub fn undo(entry: &crate::journal::JournalEntry, dry_run: bool) -> anyhow::Result<()> {
-    assert!(!entry.actions.is_empty(), "journal entry has no actions to undo");
+    assert!(
+        !entry.actions.is_empty(),
+        "journal entry has no actions to undo"
+    );
 
     for action in &entry.actions {
         if dry_run {
@@ -134,8 +147,13 @@ pub fn undo(entry: &crate::journal::JournalEntry, dry_run: bool) -> anyhow::Resu
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating parent {}", parent.display()))?;
             }
-            std::fs::rename(from, &action.original)
-                .with_context(|| format!("restoring {} from {}", action.original.display(), action.moved_to))?;
+            std::fs::rename(from, &action.original).with_context(|| {
+                format!(
+                    "restoring {} from {}",
+                    action.original.display(),
+                    action.moved_to
+                )
+            })?;
             tracing::info!("restored: {}", action.original.display());
         }
     }
@@ -234,6 +252,69 @@ fn do_delete(path: &Path, mode: DeleteMode, timestamp: &str) -> anyhow::Result<S
             }
 
             Ok("purged://".to_owned())
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+    // Proptest gated out under Miri (rusty-fork uses fork(), unsupported by Miri).
+    #[cfg(not(miri))]
+    use proptest::prelude::*;
+
+    fn empty_db() -> PacmanDb {
+        PacmanDb::default()
+    }
+
+    #[test]
+    fn validate_rejects_each_forbidden_prefix() {
+        for p in FORBIDDEN_PREFIXES {
+            let err = validate_path(Path::new(p), &empty_db()).unwrap_err();
+            assert!(
+                err.to_string().contains("forbidden"),
+                "expected forbidden error for {p}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_dotdot() {
+        let err = validate_path(Path::new("/home/u/../etc/passwd"), &empty_db()).unwrap_err();
+        assert!(err.to_string().contains(".."), "got: {err}");
+    }
+
+    #[cfg(not(miri))]
+    proptest! {
+        /// validate_path must REJECT every path in FORBIDDEN_PREFIXES, in any
+        /// case, with or without a trailing slash.
+        #[test]
+        fn property_forbidden_prefixes_always_rejected(
+            i in 0usize..FORBIDDEN_PREFIXES.len(),
+        ) {
+            // get() avoids clippy::indexing_slicing — the range above is total.
+            let p = FORBIDDEN_PREFIXES.get(i).copied().unwrap_or("/");
+            let result = validate_path(Path::new(p), &empty_db());
+            prop_assert!(result.is_err(), "should reject {p}");
+        }
+
+        /// Any path that traverses through `..` must be rejected, regardless
+        /// of where the `..` appears in the path.
+        #[test]
+        fn property_dotdot_always_rejected(
+            prefix in "[a-z]{1,8}",
+            suffix in "[a-z]{1,8}",
+        ) {
+            let path = format!("/{prefix}/../{suffix}");
+            let result = validate_path(Path::new(&path), &empty_db());
+            prop_assert!(result.is_err(), "should reject {path}");
         }
     }
 }

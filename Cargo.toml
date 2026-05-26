@@ -1,6 +1,6 @@
 [package]
 name = "pacrid"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Leftover-file reaper for Arch Linux"
 license = "GPL-3.0-or-later"
@@ -23,7 +23,6 @@ toml = "0.8"
 anyhow = "1"
 thiserror = "1"
 dialoguer = "0.11"
-indicatif = "0.17"
 walkdir = "2"
 phf = { version = "0.11", features = ["macros"] }
 trash = "5"
@@ -43,6 +42,7 @@ phf_codegen = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
 
 [profile.release]
 strip = true

@@ -180,12 +180,7 @@ fn generate_phf(out_dir: &Path, entries: &[(String, XdgJson)]) {
         // Locations static.
         write!(file, "static {loc_ident}: &[XdgEntryLocation] = &[").unwrap();
         for loc in &entry.locations {
-            write!(
-                file,
-                "XdgEntryLocation {{ path: {:?} }},",
-                loc.file
-            )
-            .unwrap();
+            write!(file, "XdgEntryLocation {{ path: {:?} }},", loc.file).unwrap();
         }
         writeln!(file, "];").unwrap();
 

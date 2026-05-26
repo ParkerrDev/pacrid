@@ -5,8 +5,8 @@ use pacrid::{
     config::Config,
     pacman::db::PacmanDb,
     scanners::{
-        name_heuristic::NameHeuristicScanner, xdg_db::XdgDbScanner, Confidence, Scanner,
-        ScanContext,
+        name_heuristic::NameHeuristicScanner, xdg_db::XdgDbScanner, Confidence, ScanContext,
+        Scanner,
     },
 };
 use std::fs;
@@ -92,12 +92,12 @@ fn steam_leftovers_detected_as_high_confidence() {
 
     // All xdg_db findings (where exe check passed = exe is gone) should be High.
     for f in &all_findings {
-        if f.reasons.iter().any(|r| {
-            matches!(r, pacrid::scanners::Reason::InXdgDatabase)
-        }) && f
-            .reasons
+        if f.reasons
             .iter()
-            .any(|r| matches!(r, pacrid::scanners::Reason::ExecutableGone(_)))
+            .any(|r| matches!(r, pacrid::scanners::Reason::InXdgDatabase))
+            && f.reasons
+                .iter()
+                .any(|r| matches!(r, pacrid::scanners::Reason::ExecutableGone(_)))
         {
             assert_eq!(
                 f.confidence,

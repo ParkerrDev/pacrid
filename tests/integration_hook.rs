@@ -52,8 +52,5 @@ fn hook_exits_zero_with_empty_stdin() {
         .output()
         .expect("failed to spawn pacrid");
 
-    assert!(
-        output.status.success(),
-        "hook with empty stdin must exit 0"
-    );
+    assert!(output.status.success(), "hook with empty stdin must exit 0");
 }
