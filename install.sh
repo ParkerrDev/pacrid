@@ -31,10 +31,12 @@ YLW='\033[1;33m'
 BLD='\033[1m'
 RST='\033[0m'
 
+# All progress messages go to stderr so functions can `echo` their result on
+# stdout without contaminating the captured value.
 die()  { echo -e "${RED}error: $*${RST}" >&2; exit 1; }
-info() { echo -e "${GRN}==>${RST} ${BLD}$*${RST}"; }
-warn() { echo -e "${YLW}warning: $*${RST}"; }
-step() { echo -e "    ${BLD}$*${RST}"; }
+info() { echo -e "${GRN}==>${RST} ${BLD}$*${RST}" >&2; }
+warn() { echo -e "${YLW}warning: $*${RST}" >&2; }
+step() { echo -e "    ${BLD}$*${RST}" >&2; }
 
 # ── pre-flight ────────────────────────────────────────────────────────────────
 
@@ -77,11 +79,13 @@ locate_or_clone_source() {
 
     local tmp
     tmp="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" EXIT
+    # No EXIT trap here — see download_release for the same reason: the trap
+    # would fire when $(locate_or_clone_source) returned and delete the clone
+    # before build/install could use it. OS-managed /tmp handles cleanup.
 
     info "Cloning $REPO_URL ..."
-    git clone --depth 1 "$REPO_URL" "$tmp"
+    # git clone progress goes to stderr by default — keeps our stdout clean.
+    git clone --depth 1 "$REPO_URL" "$tmp" >&2
     echo "$tmp"
 }
 
@@ -130,8 +134,10 @@ download_release() {
     asset="$(detect_arch_asset)"
     url="${RELEASE_BASE}/${asset}"
     tmp="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" EXIT
+    # No EXIT trap here: this function runs inside $(...) so its EXIT trap
+    # would fire as soon as command substitution returned, deleting the
+    # files we just downloaded before install_files could see them. The
+    # /tmp/tmp.XXXXXX directory is small and the OS will clean it up.
 
     info "Downloading prebuilt $asset"
     step "from: $url"
