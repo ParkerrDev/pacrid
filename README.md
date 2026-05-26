@@ -90,7 +90,7 @@ Every deletion is written to the journal at `/var/lib/pacrid/journal/<timestamp>
 ### One-line installer (recommended)
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/sauccydev/pacrid/main/install.sh | bash
+curl -sSf https://raw.githubusercontent.com/ParkerrDev/pacrid/refs/heads/master/install.sh | bash
 ```
 
 The script will:
@@ -106,7 +106,7 @@ The script will:
 
 ```bash
 # Prerequisites: rust (stable ≥ 1.80), git
-git clone https://github.com/sauccydev/pacrid
+git clone https://github.com/ParkerrDev/pacrid
 cd pacrid
 cargo build --release
 sudo install -Dm755 target/release/pacrid /usr/bin/pacrid
@@ -423,7 +423,7 @@ Contributions are welcome. The hard requirement: **`cargo clippy -- -D warnings`
 ### Dev setup
 
 ```bash
-git clone https://github.com/sauccydev/pacrid
+git clone https://github.com/ParkerrDev/pacrid
 cd pacrid
 cargo build                       # debug build
 cargo test                        # all tests
@@ -520,7 +520,7 @@ Please include:
 | pacrid removed something it shouldn't have | Run `pacrid undo` immediately. Then open an issue with details. |
 | Build fails | Check that you have internet access (build.rs fetches xdg-unused-data). Run `cargo build -vv` for details. |
 
-Open an issue at: https://github.com/sauccydev/pacrid/issues
+Open an issue at: https://github.com/ParkerrDev/pacrid/issues
 
 </details>
 
