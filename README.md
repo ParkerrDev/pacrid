@@ -2,7 +2,7 @@
 
 **pacman removes packages. pacrid removes the mess they leave behind.**
 
-When you uninstall a package, pacman deletes its binaries — but your configuration files, caches, and data directories are intentionally left alone. Over time these accumulate invisibly: `~/.config/steam`, `~/.cache/discord`, `~/.local/share/kiwix-desktop`. pacrid fixes this with a pacman `PostTransaction` hook that automatically finds and removes orphaned files every time you uninstall a package, with no manual steps required.
+When you uninstall a package, pacman deletes its binaries - but your configuration files, caches, and data directories are intentionally left alone. Over time these accumulate invisibly: `~/.config/steam`, `~/.cache/discord`, `~/.local/share/kiwix-desktop`. pacrid fixes this with a pacman `PostTransaction` hook that automatically finds and removes orphaned files every time you uninstall a package, with no manual steps required.
 
 ```bash
 curl -sSf https://raw.githubusercontent.com/sauccydev/pacrid/main/install.sh | bash
