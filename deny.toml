@@ -14,7 +14,13 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # fxhash is unmaintained but is not a security issue — it's just an older
+    # hash function with no known vulnerabilities. We pull it transitively via
+    # inquire 0.7.5 → fxhash 0.2.1. Remove this entry once inquire migrates
+    # to rustc-hash (tracked upstream).
+    { id = "RUSTSEC-2025-0057", reason = "transitive via inquire; non-security, hash-only crate" },
+]
 
 [licenses]
 # Explicit allowlist. Anything not on this list will fail the build, forcing
@@ -56,13 +62,9 @@ deny = [
     # (Currently we don't use either, but lock it down for future safety.)
     { name = "openssl-sys" },
 ]
-# Known-acceptable duplicate versions: `which` 6.x still pulls rustix 0.38
-# while `tempfile` is on rustix 1.x. Both are well-audited crates from the
-# same author, and the duplicate goes away when `which` releases its 7.x.
-skip = [
-    { name = "rustix" },
-    { name = "linux-raw-sys" },
-]
+# Known-acceptable duplicate versions get listed here. Currently empty;
+# any duplicates surface in CI as warnings for review.
+skip = []
 skip-tree = []
 
 [sources]

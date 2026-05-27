@@ -1,9 +1,21 @@
 use crate::config::AutoConfirmLevel;
 use crate::scanners::{Confidence, Finding, Reason};
 use crate::util::format_bytes;
-use dialoguer::MultiSelect;
+use inquire::MultiSelect;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+// ANSI colour codes for the interactive label. inquire renders our `String`
+// items verbatim, so we embed the escapes directly. Terminals that don't
+// understand them simply show the raw codes; in practice every modern
+// terminal on Arch Linux supports them.
+const C_RESET: &str = "\x1b[0m";
+const C_GREEN: &str = "\x1b[32m";
+const C_YELLOW: &str = "\x1b[33m";
+const C_RED: &str = "\x1b[31m";
+const C_CYAN: &str = "\x1b[36m";
+const C_DIM: &str = "\x1b[2m";
+const C_BOLD: &str = "\x1b[1m";
 
 // Directories we never collapse to even if fully orphaned — too dangerous.
 const COLLAPSE_NEVER: &[&str] = &[
@@ -79,68 +91,71 @@ fn review_package(
         "review_package called with no findings for {pkg}"
     );
 
-    println!("\nPackage: {pkg} (removed)");
+    println!("\n{C_BOLD}Package:{C_RESET} {pkg} {C_DIM}(removed){C_RESET}");
 
     let labels: Vec<String> = findings.iter().map(format_finding).collect();
 
-    let defaults: Vec<bool> = findings
+    let default_indices: Vec<usize> = findings
         .iter()
-        .map(|f| should_default_checked(f.confidence, auto_confirm_level))
+        .enumerate()
+        .filter(|(_, f)| should_default_checked(f.confidence, auto_confirm_level))
+        .map(|(i, _)| i)
         .collect();
 
-    let total_bytes: u64 = findings
+    let total_bytes: u64 = default_indices
         .iter()
-        .filter(|f| should_default_checked(f.confidence, auto_confirm_level))
+        .filter_map(|&i| findings.get(i))
         .map(|f| f.size_bytes)
         .sum();
 
-    let default_count = defaults.iter().filter(|&&b| b).count();
     println!(
-        "  Total pre-selected: {} across {} paths",
+        "  {C_DIM}Pre-selected: {} across {} paths{C_RESET}",
         format_bytes(total_bytes),
-        default_count
+        default_indices.len()
     );
 
-    let selection = MultiSelect::new()
-        .with_prompt("Select items to remove (space to toggle, enter to confirm)")
-        .items(&labels)
-        .defaults(&defaults)
-        .interact()?;
+    // inquire handles narrow-terminal rendering correctly (the bug we hit
+    // with dialoguer) and gives select-all/clear-all out of the box.
+    let selected = MultiSelect::new("Select items to remove:", labels)
+        .with_default(&default_indices)
+        .with_page_size(15)
+        .with_help_message(
+            "↑/↓ move • space toggle • → select all • ← clear • enter confirm • esc cancel",
+        )
+        .raw_prompt()?;
 
-    // selection contains valid indices into `findings` by dialoguer's contract.
-    // Use checked .get() rather than [] indexing so a bug here can never panic.
-    Ok(selection
+    // raw_prompt returns ListOption { index, value }. Map back to original
+    // findings via the index. Checked .get() means no panic on a stale index.
+    Ok(selected
         .into_iter()
-        .filter_map(|i| findings.get(i).map(|f| f.path.clone()))
+        .filter_map(|opt| findings.get(opt.index).map(|f| f.path.clone()))
         .collect())
 }
 
 fn format_finding(f: &Finding) -> String {
-    let conf = match f.confidence {
-        Confidence::High => "High  ",
-        Confidence::Medium => "Medium",
-        Confidence::Low => "Low   ",
+    let (conf_color, conf_label) = match f.confidence {
+        Confidence::High => (C_GREEN, "High"),
+        Confidence::Medium => (C_YELLOW, "Medium"),
+        Confidence::Low => (C_RED, "Low"),
     };
     let reasons = format_reasons(&f.reasons);
+    let size = format_bytes(f.size_bytes);
 
-    if f.file_count > 0 {
+    // Layout: <conf>  <path>  (size[, N files])  [reasons]
+    // Confidence first so the eye reads safety class before the path. Path
+    // gets no width truncation here — inquire wraps within its own buffer
+    // and the next render position stays sane (the dialoguer bug we hit).
+    let path_part = if f.file_count > 0 {
         format!(
-            "  {}/  ({}, {} files)  {}  [{}]",
+            "{}/ ({C_CYAN}{}, {} files{C_RESET})",
             f.path.display(),
-            format_bytes(f.size_bytes),
-            f.file_count,
-            conf,
-            reasons
+            size,
+            f.file_count
         )
     } else {
-        format!(
-            "  {}  ({})  {}  [{}]",
-            f.path.display(),
-            format_bytes(f.size_bytes),
-            conf,
-            reasons
-        )
-    }
+        format!("{} ({C_CYAN}{}{C_RESET})", f.path.display(), size)
+    };
+    format!("{conf_color}{conf_label:<6}{C_RESET}  {path_part}  {C_DIM}[{reasons}]{C_RESET}")
 }
 
 fn format_reasons(reasons: &[Reason]) -> String {
