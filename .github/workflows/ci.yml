@@ -37,6 +37,11 @@ jobs:
   audit:
     name: cargo-audit (RUSTSEC advisories)
     runs-on: ubuntu-latest
+    # checks: write so audit-check can post a check run summary.
+    # contents: read is the minimum to read source.
+    permissions:
+      checks: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0
@@ -46,6 +51,11 @@ jobs:
   deny:
     name: cargo-deny (license + supply chain)
     runs-on: ubuntu-latest
+    # cargo-deny-action also creates a check run with the report; needs
+    # the same permissions as audit above.
+    permissions:
+      checks: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
