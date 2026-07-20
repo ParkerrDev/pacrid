@@ -55,6 +55,11 @@ pub struct Config {
     pub use_trash: bool,
     #[serde(default = "default_true")]
     pub hook_enabled: bool,
+    /// Let the hook prompt on the controlling terminal instead of silently
+    /// auto-confirming. Set false for unattended machines, where a prompt
+    /// would block the pacman transaction with nobody there to answer.
+    #[serde(default = "default_true")]
+    pub hook_prompt: bool,
     #[serde(default)]
     pub scan_paths_extra: Vec<PathBuf>,
     #[serde(default)]
@@ -70,6 +75,7 @@ impl Default for Config {
             auto_remove_orphan_deps: false,
             use_trash: true,
             hook_enabled: true,
+            hook_prompt: true,
             scan_paths_extra: Vec::new(),
             scanners: ScannersConfig::default(),
             ignore: IgnoreConfig::default(),

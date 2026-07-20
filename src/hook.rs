@@ -93,8 +93,7 @@ fn run_hook_inner(
         return Ok(());
     }
 
-    // The hook runs without a TTY; non_interactive is always effectively true.
-    let to_delete = interactive_review(all_findings, &cfg.auto_confirm, non_interactive)?;
+    let to_delete = review_on_terminal(all_findings, cfg, non_interactive)?;
 
     if to_delete.is_empty() {
         tracing::info!("no paths confirmed for deletion");
@@ -116,6 +115,33 @@ fn run_hook_inner(
     );
 
     Ok(())
+}
+
+/// Review findings, prompting the human at the controlling terminal when there
+/// is one.
+///
+/// pacman captures a hook's stdout and stderr to fold them into its own log, so
+/// neither is a terminal here and the usual `isatty` check can never succeed.
+/// `TtyRedirect` points both streams back at `/dev/tty` for the duration of the
+/// prompt. Without a controlling terminal there is nobody to ask, so we keep
+/// the previous behaviour: auto-confirm at the configured threshold.
+fn review_on_terminal(
+    findings: Vec<crate::scanners::Finding>,
+    cfg: &crate::config::Config,
+    non_interactive: bool,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    if non_interactive || !cfg.hook_prompt {
+        return interactive_review(findings, &cfg.auto_confirm, true);
+    }
+
+    let Some(_redirect) = crate::tty::TtyRedirect::acquire() else {
+        tracing::debug!("no controlling terminal — auto-confirming at configured threshold");
+        return interactive_review(findings, &cfg.auto_confirm, true);
+    };
+
+    // _redirect stays alive across the prompt and drops on return, restoring
+    // the descriptors before the caller's summary goes to pacman's log.
+    interactive_review(findings, &cfg.auto_confirm, false)
 }
 
 fn scan_for_home(

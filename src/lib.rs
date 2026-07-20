@@ -40,5 +40,6 @@ pub mod journal;
 pub mod pacman;
 pub mod review;
 pub mod scanners;
+pub mod tty;
 pub mod user_homes;
 pub mod util;

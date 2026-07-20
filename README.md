@@ -59,7 +59,15 @@ Every finding is scored before being acted on:
 | **Medium** | Exact name match alone, OR pacman orphan scan found it in `/etc/`, OR XDG database entry without exe confirmation |
 | **Low** | Substring match only, path under `/var/lib/`, item > 1 GB, or anything else |
 
-The hook's default `auto_confirm` level is `High` — only High-confidence findings are removed without prompting. When you run `pacrid clean <pkg>` interactively, all findings are shown in a checkbox UI pre-selected at your configured threshold.
+When you run `pacrid clean <pkg>` interactively, all findings are shown in a checkbox UI pre-selected at your configured threshold.
+
+### Prompting from inside the hook
+
+pacman captures a hook's stdout and stderr so it can fold them into its own log, so neither is a terminal while the hook runs. pacrid opens `/dev/tty` directly and points both streams at it for the duration of the review, which means **the hook prompts you** — the same checkbox UI as `pacrid clean`, in the middle of the pacman transaction. Confidence then only decides what is *pre-checked*: High items are ticked by default, anything below your `auto_confirm` threshold is listed unticked and one spacebar away.
+
+This matters most for large directories. Anything over 1 GB is forced to Low confidence no matter how strong the evidence, because getting a 1.4 GB deletion wrong is expensive — but it is still shown to you rather than silently skipped.
+
+If there is no controlling terminal — a cron job, a GUI package manager, an unattended script — there is nobody to ask, so pacrid falls back to auto-confirming at your configured threshold and never blocks the transaction. Set `hook_prompt = false` to force that behaviour always. Esc or Ctrl-C at the prompt means "remove nothing" and the transaction continues normally.
 
 ### Home directory detection
 
@@ -267,6 +275,11 @@ use_trash = true
 # Enable/disable the pacman PostTransaction hook entirely.
 hook_enabled = true
 
+# Let the hook prompt on the controlling terminal instead of silently
+# auto-confirming at the threshold above. Falls back to auto-confirm on its
+# own when no terminal is attached; set false to never prompt from the hook.
+hook_prompt = true
+
 # Remove orphan dependency packages automatically after each transaction.
 auto_remove_orphan_deps = false
 
@@ -326,7 +339,8 @@ pacrid/
     ├── executor.rs              # Safe deletion: validate → journal → move
     ├── hook.rs                  # Pacman hook entry point; per-home scanning loop
     ├── journal.rs               # JSON undo journal (write-before-delete)
-    ├── review.rs                # Interactive checkbox UI (dialoguer::MultiSelect)
+    ├── review.rs                # Interactive checkbox UI (inquire::MultiSelect)
+    ├── tty.rs                   # Redirects stdout/stderr to /dev/tty so the hook can prompt
     ├── user_homes.rs            # Real user home detection when running as root
     ├── util.rs                  # format_bytes, compute_size, expand_xdg_with_home
     ├── pacman/

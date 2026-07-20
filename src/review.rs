@@ -1,7 +1,7 @@
 use crate::config::AutoConfirmLevel;
 use crate::scanners::{Confidence, Finding, Reason};
 use crate::util::format_bytes;
-use inquire::MultiSelect;
+use inquire::{list_option::ListOption, MultiSelect};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -114,15 +114,10 @@ fn review_package(
         default_indices.len()
     );
 
-    // inquire handles narrow-terminal rendering correctly (the bug we hit
-    // with dialoguer) and gives select-all/clear-all out of the box.
-    let selected = MultiSelect::new("Select items to remove:", labels)
-        .with_default(&default_indices)
-        .with_page_size(15)
-        .with_help_message(
-            "↑/↓ move • space toggle • → select all • ← clear • enter confirm • esc cancel",
-        )
-        .raw_prompt()?;
+    let Some(selected) = prompt_for_selection(labels, &default_indices)? else {
+        println!("  {C_DIM}cancelled — nothing removed for {pkg}{C_RESET}");
+        return Ok(Vec::new());
+    };
 
     // raw_prompt returns ListOption { index, value }. Map back to original
     // findings via the index. Checked .get() means no panic on a stale index.
@@ -130,6 +125,32 @@ fn review_package(
         .into_iter()
         .filter_map(|opt| findings.get(opt.index).map(|f| f.path.clone()))
         .collect())
+}
+
+/// Show the checkbox prompt. `Ok(None)` means the user cancelled — Esc and
+/// Ctrl-C are a deliberate "leave everything alone", not a failure. Surfacing
+/// them as errors would print a scary hook error mid-pacman-transaction.
+fn prompt_for_selection(
+    labels: Vec<String>,
+    default_indices: &[usize],
+) -> anyhow::Result<Option<Vec<ListOption<String>>>> {
+    // inquire handles narrow-terminal rendering correctly (the bug we hit
+    // with dialoguer) and gives select-all/clear-all out of the box.
+    let result = MultiSelect::new("Select items to remove:", labels)
+        .with_default(default_indices)
+        .with_page_size(15)
+        .with_help_message(
+            "↑/↓ move • space toggle • → select all • ← clear • enter confirm • esc cancel",
+        )
+        .raw_prompt();
+
+    match result {
+        Ok(items) => Ok(Some(items)),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn format_finding(f: &Finding) -> String {
