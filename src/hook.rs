@@ -107,14 +107,44 @@ fn run_hook_inner(
     };
 
     let result = execute(&to_delete, packages, &db, mode, "hook", dry_run)?;
-
-    println!(
-        "pacrid: removed {} paths, {} failed.",
-        result.succeeded.len(),
-        result.failed.len()
-    );
+    report_outcome(&result, dry_run);
 
     Ok(())
+}
+
+/// Final word from the hook, in pacman's own voice. Runs after the terminal
+/// redirect has been dropped, so this lands in pacman's log where the rest of
+/// the transaction's summary lives.
+fn report_outcome(result: &crate::executor::ExecutionResult, dry_run: bool) {
+    let removed = result.succeeded.len();
+    if removed > 0 {
+        let paths = crate::ui::count(removed, "path");
+        println!(
+            "{}",
+            crate::ui::success(&if dry_run {
+                format!("pacrid: would remove {paths}")
+            } else {
+                format!(
+                    "pacrid: removed {paths}, {} reclaimed",
+                    crate::util::format_bytes(result.freed_bytes)
+                )
+            })
+        );
+        // Only worth advertising when there is something to undo.
+        if !dry_run {
+            println!(
+                "{}",
+                crate::ui::item(&crate::ui::dim("restore with: pacrid undo"))
+            );
+        }
+    }
+
+    for (path, reason) in &result.failed {
+        println!(
+            "{}",
+            crate::ui::warning(&format!("pacrid: kept {} — {reason}", path.display()))
+        );
+    }
 }
 
 /// Review findings, prompting the human at the controlling terminal when there
@@ -130,7 +160,7 @@ fn review_on_terminal(
     cfg: &crate::config::Config,
     non_interactive: bool,
 ) -> anyhow::Result<Vec<std::path::PathBuf>> {
-    if non_interactive || !cfg.hook_prompt {
+    if non_interactive || !cfg.hook_prompt || prompt_suppressed_by_env() {
         return interactive_review(findings, &cfg.auto_confirm, true);
     }
 
@@ -142,6 +172,15 @@ fn review_on_terminal(
     // _redirect stays alive across the prompt and drops on return, restoring
     // the descriptors before the caller's summary goes to pacman's log.
     interactive_review(findings, &cfg.auto_confirm, false)
+}
+
+/// Escape hatch for automation that runs pacman *with* a terminal attached but
+/// no human watching it — CI, provisioning scripts, a test harness under a pty.
+/// The terminal check alone can't tell those apart from a real user, and a
+/// prompt nobody answers blocks the transaction indefinitely. `hook_prompt =
+/// false` does the same thing permanently for a machine.
+fn prompt_suppressed_by_env() -> bool {
+    std::env::var_os("PACRID_NO_PROMPT").is_some()
 }
 
 fn scan_for_home(

@@ -1,21 +1,20 @@
 use crate::config::AutoConfirmLevel;
 use crate::scanners::{Confidence, Finding, Reason};
+use crate::ui;
 use crate::util::format_bytes;
+use inquire::ui::{Attributes, Color, RenderConfig, StyleSheet, Styled};
 use inquire::{list_option::ListOption, MultiSelect};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-// ANSI colour codes for the interactive label. inquire renders our `String`
-// items verbatim, so we embed the escapes directly. Terminals that don't
-// understand them simply show the raw codes; in practice every modern
-// terminal on Arch Linux supports them.
-const C_RESET: &str = "\x1b[0m";
-const C_GREEN: &str = "\x1b[32m";
-const C_YELLOW: &str = "\x1b[33m";
-const C_RED: &str = "\x1b[31m";
-const C_CYAN: &str = "\x1b[36m";
-const C_DIM: &str = "\x1b[2m";
-const C_BOLD: &str = "\x1b[1m";
+// Column widths for the option list. inquire prefixes each row with
+// "> [ ] " (6 columns), which the path budget has to account for.
+const OPTION_PREFIX_WIDTH: usize = 6;
+const CONFIDENCE_WIDTH: usize = 6;
+const COLUMN_GAP: usize = 2;
+/// Never squeeze the path below this, even on a very narrow terminal — a path
+/// truncated past this point tells you nothing about what you're deleting.
+const MIN_PATH_WIDTH: usize = 24;
 
 // Directories we never collapse to even if fully orphaned — too dangerous.
 const COLLAPSE_NEVER: &[&str] = &[
@@ -91,9 +90,16 @@ fn review_package(
         "review_package called with no findings for {pkg}"
     );
 
-    println!("\n{C_BOLD}Package:{C_RESET} {pkg} {C_DIM}(removed){C_RESET}");
-
-    let labels: Vec<String> = findings.iter().map(format_finding).collect();
+    let found_bytes: u64 = findings.iter().map(|f| f.size_bytes).sum();
+    println!();
+    println!(
+        "{}",
+        ui::header(&format!(
+            "{pkg}: {} left behind ({})",
+            ui::count(findings.len(), "path"),
+            format_bytes(found_bytes)
+        ))
+    );
 
     let default_indices: Vec<usize> = findings
         .iter()
@@ -102,20 +108,14 @@ fn review_package(
         .map(|(i, _)| i)
         .collect();
 
-    let total_bytes: u64 = default_indices
-        .iter()
-        .filter_map(|&i| findings.get(i))
-        .map(|f| f.size_bytes)
-        .sum();
-
     println!(
-        "  {C_DIM}Pre-selected: {} across {} paths{C_RESET}",
-        format_bytes(total_bytes),
-        default_indices.len()
+        "{}",
+        preselection_note(findings, &default_indices, auto_confirm_level)
     );
 
+    let labels = format_findings(findings);
     let Some(selected) = prompt_for_selection(labels, &default_indices)? else {
-        println!("  {C_DIM}cancelled — nothing removed for {pkg}{C_RESET}");
+        println!("{}", ui::item(&ui::dim(&format!("skipped {pkg}"))));
         return Ok(Vec::new());
     };
 
@@ -136,12 +136,15 @@ fn prompt_for_selection(
 ) -> anyhow::Result<Option<Vec<ListOption<String>>>> {
     // inquire handles narrow-terminal rendering correctly (the bug we hit
     // with dialoguer) and gives select-all/clear-all out of the box.
-    let result = MultiSelect::new("Select items to remove:", labels)
+    let result = MultiSelect::new("Remove?", labels)
         .with_default(default_indices)
         .with_page_size(15)
-        .with_help_message(
-            "↑/↓ move • space toggle • → select all • ← clear • enter confirm • esc cancel",
-        )
+        .with_render_config(pacman_render_config())
+        // Without this, the answer line echoes every selected label in full and
+        // wraps mid-word across the terminal — the single ugliest thing pacrid
+        // leaves in a pacman transcript.
+        .with_formatter(&summarise_selection)
+        .with_help_message("↑/↓ move · space toggle · → all · ← none · enter confirm · esc skip")
         .raw_prompt();
 
     match result {
@@ -153,30 +156,173 @@ fn prompt_for_selection(
     }
 }
 
-fn format_finding(f: &Finding) -> String {
-    let (conf_color, conf_label) = match f.confidence {
-        Confidence::High => (C_GREEN, "High"),
-        Confidence::Medium => (C_YELLOW, "Medium"),
-        Confidence::Low => (C_RED, "Low"),
-    };
-    let reasons = format_reasons(&f.reasons);
-    let size = format_bytes(f.size_bytes);
-
-    // Layout: <conf>  <path>  (size[, N files])  [reasons]
-    // Confidence first so the eye reads safety class before the path. Path
-    // gets no width truncation here — inquire wraps within its own buffer
-    // and the next render position stays sane (the dialoguer bug we hit).
-    let path_part = if f.file_count > 0 {
-        format!(
-            "{}/ ({C_CYAN}{}, {} files{C_RESET})",
-            f.path.display(),
-            size,
-            f.file_count
+/// Mirrors pacman's palette so the prompt reads as part of the transaction:
+/// bold-blue `::` lead-in, `[x]`/`[ ]` checkboxes rather than unicode balls.
+fn pacman_render_config() -> RenderConfig<'static> {
+    RenderConfig::default_colored()
+        .with_prompt_prefix(Styled::new("::").with_fg(Color::LightBlue))
+        .with_answered_prompt_prefix(Styled::new("::").with_fg(Color::LightBlue))
+        .with_highlighted_option_prefix(Styled::new(">").with_fg(Color::LightBlue))
+        .with_selected_checkbox(Styled::new("[x]").with_fg(Color::LightGreen))
+        .with_unselected_checkbox(Styled::new("[ ]").with_fg(Color::DarkGrey))
+        .with_canceled_prompt_indicator(Styled::new("skipped").with_fg(Color::DarkGrey))
+        .with_help_message(StyleSheet::new().with_fg(Color::DarkGrey))
+        .with_answer(
+            StyleSheet::new()
+                .with_fg(Color::LightBlue)
+                .with_attr(Attributes::BOLD),
         )
+}
+
+/// Collapses the answer line to a count, e.g. `:: Remove? 2 paths`.
+fn summarise_selection(selected: &[ListOption<&String>]) -> String {
+    if selected.is_empty() {
+        return "nothing".to_owned();
+    }
+    ui::count(selected.len(), "path")
+}
+
+/// One line of context under the header: what is ticked and why.
+fn preselection_note(
+    findings: &[Finding],
+    default_indices: &[usize],
+    level: &AutoConfirmLevel,
+) -> String {
+    let level_name = describe_level(level);
+    if default_indices.is_empty() {
+        return ui::item(&ui::dim(&format!(
+            "nothing meets the '{level_name}' auto-confirm threshold — select to remove"
+        )));
+    }
+    let bytes: u64 = default_indices
+        .iter()
+        .filter_map(|&i| findings.get(i))
+        .map(|f| f.size_bytes)
+        .sum();
+    ui::item(&ui::dim(&format!(
+        "{} pre-selected ({}) at the '{level_name}' threshold",
+        ui::count(default_indices.len(), "path"),
+        format_bytes(bytes)
+    )))
+}
+
+fn describe_level(level: &AutoConfirmLevel) -> &'static str {
+    match level {
+        AutoConfirmLevel::High => "high",
+        AutoConfirmLevel::Medium => "medium",
+        AutoConfirmLevel::Low => "low",
+        AutoConfirmLevel::None => "none",
+    }
+}
+
+/// One option row, held as plain text so column widths can be measured before
+/// any ANSI escape makes the strings longer than they look.
+struct Row {
+    confidence: Confidence,
+    path: String,
+    size: String,
+    reasons: String,
+}
+
+impl Row {
+    fn new(f: &Finding) -> Self {
+        let path = ui::abbreviate_home(&f.path);
+        let size = if f.file_count > 0 {
+            format!("{}, {} files", format_bytes(f.size_bytes), f.file_count)
+        } else {
+            format_bytes(f.size_bytes)
+        };
+        Self {
+            confidence: f.confidence,
+            path: if f.file_count > 0 {
+                format!("{path}/")
+            } else {
+                path
+            },
+            size,
+            reasons: format_reasons(&f.reasons),
+        }
+    }
+
+    /// Confidence first so the eye reads safety class before the path, then
+    /// path, size, and — when it fits — the evidence that produced the row.
+    fn render(&self, layout: &Layout) -> String {
+        let label = match self.confidence {
+            Confidence::High => "High",
+            Confidence::Medium => "Medium",
+            Confidence::Low => "Low",
+        };
+        let cell = format!("{label:<CONFIDENCE_WIDTH$}");
+        let confidence = match self.confidence {
+            Confidence::High => ui::green(&cell),
+            Confidence::Medium => ui::yellow(&cell),
+            Confidence::Low => ui::red(&cell),
+        };
+        let path = format!(
+            "{:<width$}",
+            ui::truncate_middle(&self.path, layout.path_width),
+            width = layout.path_width
+        );
+        let size = format!("{:>width$}", self.size, width = layout.size_width);
+        let mut row = format!("{confidence}  {path}  {}", ui::bold(&size));
+        if layout.show_reasons {
+            row.push_str("  ");
+            row.push_str(&ui::dim(&self.reasons));
+        }
+        row
+    }
+}
+
+/// Column plan for one render, resolved against the terminal width.
+struct Layout {
+    path_width: usize,
+    size_width: usize,
+    show_reasons: bool,
+}
+
+/// Build the option labels, sizing columns to the terminal so rows don't wrap.
+fn format_findings(findings: &[Finding]) -> Vec<String> {
+    let rows: Vec<Row> = findings.iter().map(Row::new).collect();
+    let layout = plan_layout(&rows, ui::terminal_width());
+    rows.iter().map(|r| r.render(&layout)).collect()
+}
+
+/// Resolve column widths against the available terminal width.
+///
+/// Reasons are the first thing dropped when space runs short: they explain a
+/// row, but the path and size are what you actually decide on. The path column
+/// is what absorbs the remaining slack.
+fn plan_layout(rows: &[Row], terminal_width: usize) -> Layout {
+    let longest_path = max_chars(rows.iter().map(|r| r.path.as_str()));
+    let size_width = max_chars(rows.iter().map(|r| r.size.as_str()));
+    let reason_width = max_chars(rows.iter().map(|r| r.reasons.as_str()));
+
+    let base = OPTION_PREFIX_WIDTH
+        .saturating_add(CONFIDENCE_WIDTH)
+        .saturating_add(size_width)
+        .saturating_add(COLUMN_GAP.saturating_mul(2));
+    let with_reasons = base
+        .saturating_add(reason_width)
+        .saturating_add(COLUMN_GAP)
+        .saturating_add(MIN_PATH_WIDTH);
+
+    let show_reasons = terminal_width >= with_reasons;
+    let used = if show_reasons {
+        base.saturating_add(reason_width).saturating_add(COLUMN_GAP)
     } else {
-        format!("{} ({C_CYAN}{}{C_RESET})", f.path.display(), size)
+        base
     };
-    format!("{conf_color}{conf_label:<6}{C_RESET}  {path_part}  {C_DIM}[{reasons}]{C_RESET}")
+    let available = terminal_width.saturating_sub(used);
+
+    Layout {
+        path_width: longest_path.min(available.max(MIN_PATH_WIDTH)),
+        size_width,
+        show_reasons,
+    }
+}
+
+fn max_chars<'a>(values: impl Iterator<Item = &'a str>) -> usize {
+    values.map(|v| v.chars().count()).max().unwrap_or(0)
 }
 
 fn format_reasons(reasons: &[Reason]) -> String {
@@ -418,6 +564,44 @@ mod tests {
             category: Category::SystemOrphan,
             file_count: 0,
         }
+    }
+
+    fn rows_for(paths: &[&str]) -> Vec<Row> {
+        paths
+            .iter()
+            .map(|p| Row::new(&make_finding(p, 1_000_000)))
+            .collect()
+    }
+
+    #[test]
+    fn wide_terminal_keeps_reasons_and_full_paths() {
+        let rows = rows_for(&["/home/u/.config/kilo", "/home/u/.cache/kilo"]);
+        let layout = plan_layout(&rows, 120);
+        assert!(layout.show_reasons);
+        // "~/.config/kilo" is the longest at 14 chars; nothing is truncated.
+        assert_eq!(layout.path_width, 14);
+    }
+
+    #[test]
+    fn narrow_terminal_drops_reasons_before_squeezing_the_path() {
+        let rows = rows_for(&["/home/u/.config/kilo"]);
+        let layout = plan_layout(&rows, 40);
+        assert!(
+            !layout.show_reasons,
+            "reasons should be the first column sacrificed"
+        );
+        assert!(layout.path_width >= 14, "path must not be squeezed first");
+    }
+
+    #[test]
+    fn absurdly_narrow_terminal_still_renders_a_usable_row() {
+        let rows = rows_for(&["/home/u/.local/share/some-very-long-application-name"]);
+        let layout = plan_layout(&rows, 20);
+        assert!(!layout.show_reasons);
+        // Floor holds: never squeeze below MIN_PATH_WIDTH even with no room.
+        assert_eq!(layout.path_width, MIN_PATH_WIDTH);
+        let rendered = rows.first().unwrap().render(&layout);
+        assert!(rendered.contains('…'), "expected truncation: {rendered}");
     }
 
     #[test]

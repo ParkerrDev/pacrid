@@ -63,11 +63,30 @@ When you run `pacrid clean <pkg>` interactively, all findings are shown in a che
 
 ### Prompting from inside the hook
 
-pacman captures a hook's stdout and stderr so it can fold them into its own log, so neither is a terminal while the hook runs. pacrid opens `/dev/tty` directly and points both streams at it for the duration of the review, which means **the hook prompts you** — the same checkbox UI as `pacrid clean`, in the middle of the pacman transaction. Confidence then only decides what is *pre-checked*: High items are ticked by default, anything below your `auto_confirm` threshold is listed unticked and one spacebar away.
+pacman captures a hook's stdout and stderr so it can fold them into its own log, so neither is a terminal while the hook runs. pacrid opens `/dev/tty` directly and points both streams at it for the duration of the review, which means **the hook prompts you** — the same checkbox UI as `pacrid clean`, in the middle of the pacman transaction:
+
+```
+:: Running post-transaction hooks...
+(4/6) pacrid: scanning for leftover files
+
+:: kilo: 3 paths left behind (52.84 MiB)
+ -> 3 paths pre-selected (52.84 MiB) at the 'high' threshold
+:: Remove?
+> [x] High    ~/.config/kilo       48.49 MiB  name_match + exe_gone
+  [x] High    ~/.local/share/kilo   2.37 MiB  name_match + exe_gone
+  [x] High    ~/.cache/kilo         1.98 MiB  name_match + exe_gone
+[↑/↓ move · space toggle · → all · ← none · enter confirm · esc skip]
+:: pacrid: removed 3 paths, 52.84 MiB reclaimed
+ -> restore with: pacrid undo
+```
+
+The columns are sized to your terminal; on a narrow one the evidence column drops before the path is ever squeezed. Confidence then only decides what is *pre-checked*: High items are ticked by default, anything below your `auto_confirm` threshold is listed unticked and one spacebar away.
 
 This matters most for large directories. Anything over 1 GB is forced to Low confidence no matter how strong the evidence, because getting a 1.4 GB deletion wrong is expensive — but it is still shown to you rather than silently skipped.
 
-If there is no controlling terminal — a cron job, a GUI package manager, an unattended script — there is nobody to ask, so pacrid falls back to auto-confirming at your configured threshold and never blocks the transaction. Set `hook_prompt = false` to force that behaviour always. Esc or Ctrl-C at the prompt means "remove nothing" and the transaction continues normally.
+If there is no controlling terminal — a cron job, a GUI package manager, an unattended script — there is nobody to ask, so pacrid falls back to auto-confirming at your configured threshold and never blocks the transaction.
+
+Automation that runs pacman *with* a terminal attached but no human watching it (CI, provisioning) can't be told apart by that check, so there are two ways to force the fallback: `hook_prompt = false` in the config for a whole machine, or `PACRID_NO_PROMPT=1` in the environment for a single invocation. Esc or Ctrl-C at the prompt means "remove nothing" and the transaction continues normally.
 
 ### Home directory detection
 
@@ -341,6 +360,7 @@ pacrid/
     ├── journal.rs               # JSON undo journal (write-before-delete)
     ├── review.rs                # Interactive checkbox UI (inquire::MultiSelect)
     ├── tty.rs                   # Redirects stdout/stderr to /dev/tty so the hook can prompt
+    ├── ui.rs                    # pacman-style output: `::` headers, columns, ~ paths
     ├── user_homes.rs            # Real user home detection when running as root
     ├── util.rs                  # format_bytes, compute_size, expand_xdg_with_home
     ├── pacman/

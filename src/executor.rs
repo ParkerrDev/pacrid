@@ -22,6 +22,10 @@ pub struct ExecutionResult {
     pub succeeded: Vec<std::path::PathBuf>,
     pub failed: Vec<(std::path::PathBuf, String)>,
     pub journal_path: Option<std::path::PathBuf>,
+    /// Total bytes reclaimed, taken from the journal actions so it counts what
+    /// was actually moved rather than what was proposed. Zero under `--dry-run`,
+    /// where nothing is journalled.
+    pub freed_bytes: u64,
 }
 
 /// Execute deletion of the given paths.
@@ -70,10 +74,16 @@ pub fn execute(
         None
     };
 
+    let freed_bytes = journal
+        .actions
+        .iter()
+        .fold(0_u64, |acc, a| acc.saturating_add(a.size));
+
     Ok(ExecutionResult {
         succeeded,
         failed,
         journal_path,
+        freed_bytes,
     })
 }
 

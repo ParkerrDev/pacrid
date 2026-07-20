@@ -19,6 +19,7 @@ use pacrid::{
         name_heuristic::NameHeuristicScanner, orphan_deps, pacman_orphan::PacmanOrphanScanner,
         xdg_db::XdgDbScanner, ScanContext, Scanner,
     },
+    ui,
     util::format_bytes,
 };
 use std::path::PathBuf;
@@ -120,7 +121,7 @@ enum DbSubcommand {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_logging(cli.verbose, cli.quiet);
+    init_logging(cli.verbose, cli.quiet, matches!(cli.command, Command::Hook));
 
     let mut cfg = config::load();
     if let Some(ref level) = cli.auto_confirm {
@@ -130,20 +131,33 @@ fn main() -> anyhow::Result<()> {
     dispatch_command(&cli, &cfg)
 }
 
-fn init_logging(verbose: u8, quiet: bool) {
+fn init_logging(verbose: u8, quiet: bool, in_hook: bool) {
     let log_level = if quiet {
         tracing::Level::ERROR
     } else if verbose >= 2 {
         tracing::Level::TRACE
     } else if verbose == 1 {
         tracing::Level::DEBUG
+    } else if in_hook {
+        // pacman folds hook output into its own log as ALPM-SCRIPTLET lines,
+        // so INFO chatter shows up verbatim in the middle of the user's
+        // transaction. Progress is reported in pacman's style instead; only
+        // real problems get logged. -v brings the detail back.
+        tracing::Level::WARN
     } else {
         tracing::Level::INFO
     };
-    tracing_subscriber::fmt()
+
+    let builder = tracing_subscriber::fmt()
         .with_max_level(log_level)
-        .with_target(false)
-        .init();
+        .with_target(false);
+
+    // ISO timestamps next to pacman's own untimed output look like debris.
+    if in_hook {
+        builder.without_time().init();
+    } else {
+        builder.init();
+    }
 }
 
 fn dispatch_command(cli: &Cli, cfg: &config::Config) -> anyhow::Result<()> {
@@ -190,24 +204,52 @@ fn run_clean(
     let all_findings = run_scanners(&ctx, cfg);
 
     if all_findings.is_empty() {
-        println!("No leftover files found for: {}", packages.join(", "));
+        println!(
+            "{}",
+            ui::header(&format!("no leftovers found for {}", packages.join(", ")))
+        );
         return Ok(());
     }
 
     let to_delete = interactive_review(all_findings, &cfg.auto_confirm, non_interactive)?;
     if to_delete.is_empty() {
-        println!("Nothing to remove.");
+        println!("{}", ui::header("nothing removed"));
         return Ok(());
     }
 
     let mode = pick_delete_mode(purge, cfg.use_trash);
     let result = executor::execute(&to_delete, packages, &db, mode, "manual", dry_run)?;
-    println!(
-        "Done. {} removed, {} failed.",
-        result.succeeded.len(),
-        result.failed.len()
-    );
+    report_outcome(&result, dry_run);
     Ok(())
+}
+
+/// Shared closing summary for `clean` and `sweep`, in pacman's voice.
+fn report_outcome(result: &executor::ExecutionResult, dry_run: bool) {
+    let removed = result.succeeded.len();
+    if removed > 0 {
+        let paths = ui::count(removed, "path");
+        println!(
+            "{}",
+            ui::success(&if dry_run {
+                format!("would remove {paths}")
+            } else {
+                format!(
+                    "removed {paths}, {} reclaimed",
+                    format_bytes(result.freed_bytes)
+                )
+            })
+        );
+        if !dry_run {
+            println!("{}", ui::item(&ui::dim("restore with: pacrid undo")));
+        }
+    }
+
+    for (path, reason) in &result.failed {
+        println!(
+            "{}",
+            ui::warning(&format!("kept {} — {reason}", path.display()))
+        );
+    }
 }
 
 fn build_scan_context(packages: &[String], cfg: &config::Config, db: &PacmanDb) -> ScanContext {
@@ -275,16 +317,19 @@ fn run_sweep(
     let findings = scanner.scan(&ctx)?;
 
     if findings.is_empty() {
-        println!("No orphaned system files found.");
+        println!("{}", ui::header("no orphaned system files found"));
         return Ok(());
     }
 
-    println!("Found {} orphaned paths.", findings.len());
+    println!(
+        "{}",
+        ui::header(&format!("{} orphaned", ui::count(findings.len(), "path")))
+    );
 
     let to_delete = interactive_review(findings, &cfg.auto_confirm, non_interactive)?;
 
     if to_delete.is_empty() {
-        println!("Nothing to remove.");
+        println!("{}", ui::header("nothing removed"));
         return Ok(());
     }
 
@@ -301,11 +346,7 @@ fn run_sweep(
         "sweep",
         dry_run,
     )?;
-    println!(
-        "Done. {} removed, {} failed.",
-        result.succeeded.len(),
-        result.failed.len()
-    );
+    report_outcome(&result, dry_run);
 
     Ok(())
 }
